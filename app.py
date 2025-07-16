@@ -18,7 +18,7 @@ credentials = ee.ServiceAccountCredentials(service_account, key_file)
 ee.Initialize(credentials)
 
 # --- FastAPI App ---
-app = FastAPI(title="Sentinel-2 Crop Stress Detection API", version="1.0.0")
+app = FastAPI(title="Crop Stress Detection API", version="1.0.0")
 
 # --- Pydantic Models ---
 class LocationRequest(BaseModel):
@@ -55,7 +55,7 @@ def get_ndvi_image_url(lat: float, lon: float, buffer_distance: int, days_back: 
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold))
         
         if s2_collection.size().getInfo() == 0:
-            raise HTTPException(status_code=404, detail="No suitable Sentinel-2 images found for the specified criteria")
+            raise HTTPException(status_code=404, detail="No suitable images found for the specified criteria")
         
         s2 = s2_collection.median().clip(aoi)
         band_names = s2.bandNames().getInfo()
@@ -125,7 +125,7 @@ def download_and_convert_image(image_url: str, width: int, height: int) -> io.By
 # --- API Endpoints ---
 @app.get("/")
 async def root():
-    return {"message": "Sentinel-2 Crop Stress Detection API", "version": "1.0.0"}
+    return {"message": "Crop Stress Detection API", "version": "1.0.0"}
 
 @app.get("/health")
 async def health_check():
