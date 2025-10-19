@@ -1,13 +1,11 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import folium
 import datetime
 import ee
 import io
 import base64
 from PIL import Image
-import numpy as np
 import requests
 from typing import Optional
 
@@ -34,11 +32,13 @@ class NDVIResponse(BaseModel):
     status: str
     message: str
     location: dict
-    ndvi_stats: Optional[dict] = None
+    ndvi_stats: dict
+    ndvi_image_base64: str  # Base64 encoded JPEG image
 
 # --- Helper Functions ---
-def get_ndvi_image_url(lat: float, lon: float, buffer_distance: int, days_back: int, cloud_threshold: int) -> tuple:
-    """Generate NDVI visualization and return image URL and stats"""
+def get_ndvi_data(lat: float, lon: float, buffer_distance: int, days_back: int, 
+                  cloud_threshold: int, image_width: int, image_height: int) -> tuple:
+    """Generate NDVI visualization and return image data and stats"""
     try:
         # Create geometry
         point = ee.Geometry.Point([lon, lat])
@@ -83,21 +83,14 @@ def get_ndvi_image_url(lat: float, lon: float, buffer_distance: int, days_back: 
             "min": 0.0,
             "max": 1.0,
             "palette": ["red", "orange", "yellow", "green", "darkgreen"],
-            "dimensions": "800x600",
+            "dimensions": f"{image_width}x{image_height}",
             "format": "png"
         }
         
         # Get the image URL
         image_url = ndvi.getThumbURL(vis_params)
         
-        return image_url, ndvi_stats
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing NDVI: {str(e)}")
-
-def download_and_convert_image(image_url: str, width: int, height: int) -> io.BytesIO:
-    """Download image from URL and convert to JPEG"""
-    try:
+        # Download and convert image to base64
         response = requests.get(image_url, timeout=30)
         response.raise_for_status()
         
@@ -109,18 +102,21 @@ def download_and_convert_image(image_url: str, width: int, height: int) -> io.By
             img = img.convert('RGB')
         
         # Resize if needed
-        if img.size != (width, height):
-            img = img.resize((width, height), Image.Resampling.LANCZOS)
+        if img.size != (image_width, image_height):
+            img = img.resize((image_width, image_height), Image.Resampling.LANCZOS)
         
-        # Save as JPEG
+        # Save as JPEG to BytesIO
         output = io.BytesIO()
         img.save(output, format='JPEG', quality=95)
         output.seek(0)
         
-        return output
+        # Convert to base64
+        image_base64 = base64.b64encode(output.getvalue()).decode('utf-8')
+        
+        return image_base64, ndvi_stats
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing NDVI: {str(e)}")
 
 # --- API Endpoints ---
 @app.get("/")
@@ -131,9 +127,12 @@ async def root():
 async def health_check():
     return {"status": "healthy", "earth_engine": "initialized"}
 
-@app.post("/generate-ndvi-image")
-async def generate_ndvi_image(request: LocationRequest):
-    """Generate NDVI heatmap image from coordinates"""
+@app.post("/analyze-ndvi", response_model=NDVIResponse)
+async def analyze_ndvi(request: LocationRequest):
+    """
+    Combined endpoint: Generate NDVI heatmap image and statistics from coordinates.
+    Returns JSON with base64-encoded image and NDVI stats.
+    """
     try:
         # Validate coordinates
         if not (-90 <= request.latitude <= 90):
@@ -141,50 +140,15 @@ async def generate_ndvi_image(request: LocationRequest):
         if not (-180 <= request.longitude <= 180):
             raise HTTPException(status_code=400, detail="Invalid longitude. Must be between -180 and 180")
         
-        # Get NDVI image URL and stats
-        image_url, ndvi_stats = get_ndvi_image_url(
+        # Get NDVI image and stats
+        image_base64, ndvi_stats = get_ndvi_data(
             request.latitude, 
             request.longitude, 
             request.buffer_distance,
             request.days_back,
-            request.cloud_threshold
-        )
-        
-        # Download and convert image
-        jpeg_image = download_and_convert_image(image_url, request.image_width, request.image_height)
-        
-        # Return JPEG image
-        return StreamingResponse(
-            jpeg_image, 
-            media_type="image/jpeg",
-            headers={
-                "Content-Disposition": f"inline; filename=ndvi_{request.latitude}_{request.longitude}.jpg",
-                "X-NDVI-Stats": str(ndvi_stats)
-            }
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.post("/get-ndvi-stats")
-async def get_ndvi_stats(request: LocationRequest):
-    """Get NDVI statistics for a location (JSON response)"""
-    try:
-        # Validate coordinates
-        if not (-90 <= request.latitude <= 90):
-            raise HTTPException(status_code=400, detail="Invalid latitude. Must be between -90 and 90")
-        if not (-180 <= request.longitude <= 180):
-            raise HTTPException(status_code=400, detail="Invalid longitude. Must be between -180 and 180")
-        
-        # Get NDVI stats
-        _, ndvi_stats = get_ndvi_image_url(
-            request.latitude, 
-            request.longitude, 
-            request.buffer_distance,
-            request.days_back,
-            request.cloud_threshold
+            request.cloud_threshold,
+            request.image_width,
+            request.image_height
         )
         
         # Interpret NDVI values
@@ -217,7 +181,8 @@ async def get_ndvi_stats(request: LocationRequest):
                 "std_ndvi": ndvi_stats.get('NDVI_stdDev', 0),
                 "health_status": health_status,
                 "analysis_period_days": request.days_back
-            }
+            },
+            ndvi_image_base64=image_base64
         )
         
     except HTTPException:
